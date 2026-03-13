@@ -1,3 +1,337 @@
+# When Algorithms Go Rogue
+## Whistleblowers & the Hidden Risks of AI-Powered AML in Algorithmic Trading
+
+**MSc Finance & Economics | Masters Dissertation | Student ID: 24033339**
+
+This notebook covers:
+1. Simulated Algorithmic Trading — Normal vs manipulated trade patterns
+2. Insider Trading Detection — Abnormal return analysis (multinational vs domestic)
+3. AML Anomaly Detection — Machine learning model to flag suspicious transactions
+4. Explainable AI (XAI) — Feature importance for AML transparency
+5. OLS Regression — Multivariate insider trading framework
+6. Visualisations — All key charts from the dissertation methodology
+
+                                            
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+import seaborn as sns
+from scipy import stats
+from sklearn.ensemble import IsolationForest, RandomForestClassifier
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score
+import statsmodels.api as sm
+import warnings
+warnings.filterwarnings('ignore')
+
+plt.rcParams['figure.figsize'] = (12, 6)
+plt.rcParams['axes.facecolor'] = '#0d1117'
+plt.rcParams['figure.facecolor'] = '#0d1117'
+plt.rcParams['text.color'] = 'white'
+plt.rcParams['axes.labelcolor'] = 'white'
+plt.rcParams['xtick.color'] = 'white'
+plt.rcParams['ytick.color'] = 'white'
+plt.rcParams['axes.edgecolor'] = '#333'
+plt.rcParams['grid.color'] = '#333'
+plt.rcParams['grid.alpha'] = 0.4
+
+ACCENT = '#00ff9d'
+RED    = '#ff6b6b'
+BLUE   = '#7b61ff'
+AMBER  = '#f0a020'
+
+np.random.seed(42)
+print('Libraries loaded successfully.')
+
+# Simulate 252 trading days
+n_days = 252
+dates  = pd.date_range('2023-01-01', periods=n_days, freq='B')
+
+# Normal market returns — random walk
+market_returns = np.random.normal(0.0003, 0.012, n_days)
+market_price   = 100 * np.cumprod(1 + market_returns)
+
+# Normal algorithmic trader follows market with noise
+normal_returns = market_returns + np.random.normal(0, 0.005, n_days)
+normal_cumret  = np.cumprod(1 + normal_returns)
+
+# Rogue algorithm: has advance knowledge of 8 events (simulated insider info)
+rogue_returns = market_returns.copy()
+event_days    = np.random.choice(range(20, n_days-5), size=8, replace=False)
+
+for day in event_days:
+    rogue_returns[day-3:day]   += 0.025  # Abnormal buys pre-event
+    rogue_returns[day]         += 0.04   # Event day spike
+    rogue_returns[day+1:day+3] -= 0.01   # Quick exit
+
+rogue_cumret = np.cumprod(1 + rogue_returns)
+
+fig, axes = plt.subplots(2, 1, figsize=(14, 10))
+
+ax1 = axes[0]
+ax1.plot(dates, normal_cumret, color=BLUE,  lw=1.5, label='Normal Algo Trader')
+ax1.plot(dates, rogue_cumret,  color=ACCENT, lw=1.5, label='Rogue Algorithm (Insider)')
+for day in event_days:
+    ax1.axvline(dates[day], color=RED, alpha=0.4, lw=0.8, ls='--')
+ax1.set_title('Cumulative Returns: Normal vs Rogue Algorithm', color='white', fontsize=13)
+ax1.set_ylabel('Cumulative Return (Base=1.0)')
+ax1.legend()
+ax1.grid(True)
+
+roll_diff = pd.Series(rogue_returns - normal_returns).rolling(10).mean()
+ax2 = axes[1]
+ax2.bar(dates, rogue_returns - normal_returns,
+        color=[RED if x > 0.01 else '#444' for x in (rogue_returns - normal_returns)],
+        alpha=0.7, width=1)
+ax2.plot(dates, roll_diff, color=AMBER, lw=2, label='10-day Rolling Mean Excess Return')
+ax2.axhline(0.01, color=RED, ls='--', alpha=0.6, label='Anomaly Threshold (1%)')
+ax2.set_title('Excess Returns of Rogue Algorithm (AML Detection Signal)', color='white', fontsize=13)
+ax2.set_ylabel('Daily Excess Return')
+ax2.legend()
+ax2.grid(True)
+
+plt.tight_layout()
+plt.savefig('01_trading_patterns.png', dpi=150, bbox_inches='tight')
+plt.show()
+
+rogue_total  = (rogue_cumret[-1]  - 1) * 100
+normal_total = (normal_cumret[-1] - 1) * 100
+print(f'Normal Algo Final Return:  {normal_total:.2f}%')
+print(f'Rogue Algorithm Return:    {rogue_total:.2f}%')
+print(f'Excess Return (Rogue):     {rogue_total - normal_total:.2f}%')
+
+n_purchase = 2000
+n_sale     = 4000
+
+def simulate_insider_data(n, firm_type, trade_type):
+    if firm_type == 'multinational' and trade_type == 'purchase':
+        top_level_returns = np.random.normal(0.0257, 0.018, n // 2)
+        other_returns     = np.random.normal(0.0188, 0.015, n // 2)
+    elif firm_type == 'domestic' and trade_type == 'purchase':
+        top_level_returns = np.random.normal(0.0161, 0.018, n // 2)
+        other_returns     = np.random.normal(0.0138, 0.015, n // 2)
+    else:
+        top_level_returns = np.random.normal(-0.002, 0.012, n // 2)
+        other_returns     = np.random.normal(-0.001, 0.012, n // 2)
+
+    df = pd.DataFrame({
+        'abnormal_return':   np.concatenate([top_level_returns, other_returns]),
+        'insider_type':      ['top_level'] * (n // 2) + ['other'] * (n // 2),
+        'firm_type':         firm_type,
+        'trade_type':        trade_type,
+        'market_cap':        np.random.lognormal(mean=10, sigma=1.2, size=n),
+        'book_to_market':    np.random.uniform(0.1, 1.5, n),
+        'past_return':       np.random.normal(0.01, 0.05, n),
+        'foreign_sales_pct': np.random.uniform(0.1, 0.8, n) if firm_type == 'multinational' else np.zeros(n)
+    })
+    return df
+
+dfs = [
+    simulate_insider_data(n_purchase, 'multinational', 'purchase'),
+    simulate_insider_data(n_purchase, 'domestic',      'purchase'),
+    simulate_insider_data(n_sale,     'multinational', 'sale'),
+    simulate_insider_data(n_sale,     'domestic',      'sale'),
+]
+data = pd.concat(dfs, ignore_index=True)
+
+print('Dataset shape:', data.shape)
+summary = data.groupby(['firm_type', 'trade_type', 'insider_type'])['abnormal_return'].agg(
+    mean='mean', std='std', count='count'
+).round(4)
+print(summary.to_string())
+
+mn_purchase = data[(data.firm_type == 'multinational') & (data.trade_type == 'purchase')]['abnormal_return']
+dm_purchase = data[(data.firm_type == 'domestic')      & (data.trade_type == 'purchase')]['abnormal_return']
+
+t_stat, p_val = stats.ttest_ind(mn_purchase, dm_purchase)
+
+print('=== T-Test: Multinational vs Domestic Purchase Returns ===')
+print(f'Multinational mean: {mn_purchase.mean()*100:.2f}%')
+print(f'Domestic mean:      {dm_purchase.mean()*100:.2f}%')
+print(f'Difference:         {(mn_purchase.mean() - dm_purchase.mean())*100:.2f}%')
+print(f'T-statistic:        {t_stat:.4f}')
+print(f'P-value:            {p_val:.6f}  {"*** Significant at 1%" if p_val < 0.01 else ""}')
+
+fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+
+ax1 = axes[0]
+purchase_data = data[data.trade_type == 'purchase']
+groups = [purchase_data[purchase_data.firm_type == 'multinational']['abnormal_return'],
+          purchase_data[purchase_data.firm_type == 'domestic']['abnormal_return']]
+ax1.boxplot(groups, labels=['Multinational', 'Domestic'],
+            patch_artist=True, notch=True,
+            boxprops=dict(facecolor='#1a1a2e', color=ACCENT),
+            medianprops=dict(color=ACCENT, lw=2),
+            whiskerprops=dict(color='white'),
+            capprops=dict(color='white'),
+            flierprops=dict(marker='.', color=RED, alpha=0.3))
+ax1.set_title('Abnormal Returns — Purchase Months', color='white', fontsize=12)
+ax1.set_ylabel('Abnormal Return')
+ax1.axhline(0, color=RED, ls='--', alpha=0.5)
+ax1.grid(True)
+
+ax2 = axes[1]
+insider_means = purchase_data.groupby(['firm_type', 'insider_type'])['abnormal_return'].mean() * 100
+insider_means = insider_means.unstack()
+x     = np.arange(len(insider_means.index))
+width = 0.35
+bars1 = ax2.bar(x - width/2, insider_means['top_level'], width, label='Top-Level Insider', color=ACCENT, alpha=0.85)
+bars2 = ax2.bar(x + width/2, insider_means['other'],     width, label='Other Insider',     color=BLUE,  alpha=0.85)
+for bar in bars1:
+    ax2.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.02,
+             f'{bar.get_height():.2f}%', ha='center', color='white', fontsize=9)
+for bar in bars2:
+    ax2.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.02,
+             f'{bar.get_height():.2f}%', ha='center', color='white', fontsize=9)
+ax2.set_title('Abnormal Returns by Firm Type & Insider Role', color='white', fontsize=12)
+ax2.set_ylabel('Mean Abnormal Return (%)')
+ax2.set_xticks(x)
+ax2.set_xticklabels(['Domestic', 'Multinational'])
+ax2.legend()
+ax2.grid(True, axis='y')
+
+plt.tight_layout()
+plt.savefig('02_abnormal_returns.png', dpi=150, bbox_inches='tight')
+plt.show()
+
+purchase_df = data[data.trade_type == 'purchase'].copy()
+purchase_df['is_multinational']   = (purchase_df['firm_type'] == 'multinational').astype(int)
+purchase_df['is_top_level']       = (purchase_df['insider_type'] == 'top_level').astype(int)
+purchase_df['high_foreign_sales'] = (purchase_df['foreign_sales_pct'] > 0.25).astype(int)
+purchase_df['log_market_cap']     = np.log(purchase_df['market_cap'])
+purchase_df['mn_x_toplevel']      = purchase_df['is_multinational'] * purchase_df['is_top_level']
+y = purchase_df['abnormal_return']
+
+X1 = sm.add_constant(purchase_df[['is_multinational']])
+X2 = sm.add_constant(purchase_df[['is_multinational', 'is_top_level', 'high_foreign_sales',
+                                    'log_market_cap', 'book_to_market', 'past_return']])
+X3 = sm.add_constant(purchase_df[['is_multinational', 'is_top_level', 'mn_x_toplevel',
+                                    'log_market_cap', 'book_to_market', 'past_return']])
+
+model1 = sm.OLS(y, X1).fit(cov_type='HC3')
+model2 = sm.OLS(y, X2).fit(cov_type='HC3')
+model3 = sm.OLS(y, X3).fit(cov_type='HC3')
+
+def sig_stars(pval):
+    if pval < 0.01: return '***'
+    if pval < 0.05: return '**'
+    if pval < 0.10: return '*'
+    return ''
+
+print('=' * 65)
+print('  REGRESSION RESULTS — Replicating Dissertation Table 4')
+print('=' * 65)
+print(f"{'Variable':<28} {'Model 1':>10} {'Model 2':>10} {'Model 3':>10}")
+print('-' * 65)
+
+vars_to_show = ['const', 'is_multinational', 'is_top_level', 'mn_x_toplevel',
+                'high_foreign_sales', 'log_market_cap', 'book_to_market', 'past_return']
+
+for v in vars_to_show:
+    row = f'{v:<28}'
+    for model in [model1, model2, model3]:
+        if v in model.params.index:
+            coef = model.params[v]
+            pval = model.pvalues[v]
+            row += f' {coef:>7.4f}{sig_stars(pval):>3}'
+        else:
+            row += f" {'—':>10}"
+    print(row)
+
+print('-' * 65)
+print(f"{'R-squared':<28} {model1.rsquared:>10.4f} {model2.rsquared:>10.4f} {model3.rsquared:>10.4f}")
+print(f"{'N observations':<28} {int(model1.nobs):>10} {int(model2.nobs):>10} {int(model3.nobs):>10}")
+print('\n*** p<0.01  ** p<0.05  * p<0.10')
+
+n_legit      = 5000
+n_suspicious = 200
+
+legit = pd.DataFrame({
+    'transaction_amount': np.random.lognormal(mean=7,   sigma=1.2, size=n_legit),
+    'trade_frequency':    np.random.poisson(lam=5,                 size=n_legit),
+    'time_of_day':        np.random.uniform(8, 18,                 size=n_legit),
+    'counterparties':     np.random.poisson(lam=3,                 size=n_legit),
+    'cross_border':       np.random.binomial(1, 0.15,              size=n_legit),
+    'round_amount':       np.random.binomial(1, 0.05,              size=n_legit),
+    'rapid_succession':   np.random.binomial(1, 0.03,              size=n_legit),
+    'pre_announcement':   np.random.binomial(1, 0.02,              size=n_legit),
+    'label': 0
+})
+
+suspicious = pd.DataFrame({
+    'transaction_amount': np.random.lognormal(mean=8.5, sigma=0.5,  size=n_suspicious),
+    'trade_frequency':    np.random.poisson(lam=25,                  size=n_suspicious),
+    'time_of_day':        np.random.choice(np.concatenate([
+                              np.random.uniform(0, 6,  n_suspicious//2),
+                              np.random.uniform(20, 24,n_suspicious//2)]), n_suspicious),
+    'counterparties':     np.random.poisson(lam=15,                  size=n_suspicious),
+    'cross_border':       np.random.binomial(1, 0.85,                size=n_suspicious),
+    'round_amount':       np.random.binomial(1, 0.75,                size=n_suspicious),
+    'rapid_succession':   np.random.binomial(1, 0.80,                size=n_suspicious),
+    'pre_announcement':   np.random.binomial(1, 0.70,                size=n_suspicious),
+    'label': 1
+})
+
+transactions = pd.concat([legit, suspicious], ignore_index=True).sample(frac=1, random_state=42)
+features = ['transaction_amount', 'trade_frequency', 'time_of_day', 'counterparties',
+            'cross_border', 'round_amount', 'rapid_succession', 'pre_announcement']
+
+X = transactions[features]
+y = transactions['label']
+
+scaler   = StandardScaler()
+X_scaled = scaler.fit_transform(X)
+
+# Isolation Forest
+iso_forest  = IsolationForest(n_estimators=200, contamination=0.04, random_state=42)
+iso_pred    = iso_forest.fit_predict(X_scaled)
+transactions['anomaly_score'] = iso_forest.score_samples(X_scaled)
+transactions['iso_flagged']   = (iso_pred == -1).astype(int)
+
+print('=== Isolation Forest ===')
+print(f'Flagged: {transactions["iso_flagged"].sum()}')
+print(f'True suspicious captured: {((transactions["iso_flagged"]==1) & (y==1)).sum()} / {y.sum()}')
+
+# Random Forest
+X_train, X_test, y_train, y_test = train_test_split(
+    X_scaled, y, test_size=0.3, random_state=42, stratify=y)
+rf_model = RandomForestClassifier(
+    n_estimators=200, max_depth=8, class_weight='balanced', random_state=42)
+rf_model.fit(X_train, y_train)
+rf_pred  = rf_model.predict(X_test)
+rf_proba = rf_model.predict_proba(X_test)[:, 1]
+
+print('\n=== Random Forest ===')
+print(classification_report(y_test, rf_pred, target_names=['Legitimate', 'Suspicious']))
+print(f'ROC-AUC: {roc_auc_score(y_test, rf_proba):.4f}')
+
+display_names = ['Txn Amount', 'Trade Frequency', 'Time of Day', 'Counterparties',
+                 'Cross-Border', 'Round Amount', 'Rapid Succession', 'Pre-Announcement']
+
+fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+
+ax1 = axes[0]
+legit_scores = transactions[transactions.label == 0]['anomaly_score']
+sus_scores   = transactions[transactions.label == 1]['anomaly_score']
+ax1.hist(legit_scores, bins=40, alpha=0.7, color=BLUE, label='Legitimate', density=True)
+ax1.hist(sus_scores,   bins=40, alpha=0.7, color=RED,  label='Suspicious', density=True)
+ax1.axvline(transactions['anomaly_score'].quantile(0.04),
+            color=AMBER, ls='--', lw=2, label='Detection Threshold')
+ax1.set_title('Isolation Forest\nAnomaly Score Distribution', color='white')
+ax1.set_xlabel('Anomaly Score (lower = more anomalous)')
+ax1.legend()
+ax1.grid(True)
+
+ax2 = axes[1]
+cm = confusion_matrix(y_test, rf_pred)
+sns.heatmap(cm, annot=True, fmt='d', cmap='Greens', ax=ax2,
+            xticklabels=['Legitimate', 'Suspicious'],
+            yticklabels=['Legitimate', 'Suspicious'], cbar=False)
+ax2.set_title('Random Forest\nConfusion Matrix', color='white')
+ax2.set_ylabel('True Label')
+ax2.set_xlabel('Predicted Label')
 
 ax3 = axes[2]
 importance    = rf_model.feature_importances_
@@ -68,6 +402,7 @@ ax2.legend(handles=[red_patch, blue_patch])
 plt.tight_layout()
 plt.savefig('04_xai_explanation.png', dpi=150, bbox_inches='tight')
 plt.show()
+
 n_minutes   = 60
 price       = np.zeros(n_minutes)
 price[0]    = 100.0
